@@ -107,14 +107,12 @@ def extract_all_text(uploaded_file):
 # 3. 메인 화면 구성
 st.markdown("""
 <style>
-    .main-title { font-size: 22px; font-weight: 800; color: #0F2C59; margin-bottom: 2px; }
-    .sub-title { font-size: 13px; color: #64748B; margin-bottom: 15px; }
+    .main-title { font-size: 22px; font-weight: 800; color: #0F2C59; margin-bottom: 20px; }
     .stTextArea textarea { font-family: 'Pretendard', 'Apple SD Gothic Neo', sans-serif; font-size: 13.5px; }
 </style>
 """, unsafe_allow_html=True)
 
 st.markdown('<div class="main-title">🎙️ CTS 보도국 Style Assist Pro (단신 자동 생성 시스템)</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-title">실측 앵커 리딩 속도(초당 6.3자) 기반 정밀 RT 및 바자막 엔진 탑재</div>', unsafe_allow_html=True)
 
 try:
     api_key = st.secrets.get("GEMINI_API_KEY", "")
@@ -233,7 +231,7 @@ with col_out:
         elif not final_input_text:
             st.error("⚠️ 보도자료 내용이 비어있습니다.")
         else:
-            with st.spinner("실측 리딩 속도(초당 6.3자)에 맞추어 단신 원고를 작성 중..."):
+            with st.spinner("단신 원고를 작성 중..."):
                 clean_key = api_key.strip()
 
                 prompt = f"""
@@ -252,8 +250,7 @@ with col_out:
 [보도자료 원문 텍스트]:
 {final_input_text}
 
-[★ CTS 보도국 실측 앵커 리딩 기준 (초당 6.3자 엄수) ★]:
-- 앵커가 스튜디오에서 읽는 실제 속도는 [초당 정확히 6.3자(공백 포함)]입니다.
+[★ 방송 리딩 분량 규격 ★]:
 - 아래 글자 수 범위를 정확히 충족하여 방송 초수를 맞추십시오:
   * 30초 선택 시: 3단락 / 본문 전체 글자 수 공백 포함 [185~195자]
   * 40초 선택 시: 3~4단락 / 본문 전체 글자 수 공백 포함 [245~255자]
@@ -322,7 +319,7 @@ with col_out:
                         if res.status_code == 200:
                             res_json = res.json()
                             result_text = res_json['candidates'][0]['content']['parts'][0]['text']
-                            st.text_area("완성된 단신 기사 (복사하여 송출 시스템에 바로 사용)", value=result_text, height=470)
+                            st.text_area("완성된 단신 기사 (복사하여 전체 원고에 사용)", value=result_text, height=470)
                             display_name = target.replace('models/', '')
                             st.success(f"원고 생성 완료 (엔진: {display_name})")
                             success = True
