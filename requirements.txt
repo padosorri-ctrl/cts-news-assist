@@ -1,0 +1,5 @@
+streamlit
+requests
+pdfplumber
+pypdf
+python-docx
