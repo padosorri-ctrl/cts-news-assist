@@ -240,6 +240,37 @@ def call_ai(engine, api_key, turns, models):
     return fn(api_key, turns, models)
 
 
+SPAN_MIN, SPAN_MAX = 10, 40  # 자막줄 한 구간의 권장 길이(공백 포함 글자 수)
+
+
+def check_spans(text):
+    """자막줄 구간의 문제점 목록: 1문단 표시, 너무 긴 구간, 단락 전체 덮기, 구간 사이 틈 없음."""
+    m = re.search(re.escape(BODY_START) + r"\s*(.*?)\s*" + re.escape(BODY_END), text, re.S)
+    if not m:
+        return []
+    paras = [p for p in re.split(r"\n\s*\n", m.group(1)) if p.strip()]
+    problems = []
+    for i, para in enumerate(paras):
+        spans = list(re.finditer(r"\{(\d+)\}(.*?)\{/\1\}", para, re.S))
+        if not spans:
+            continue
+        if i == 0:
+            problems.append("1문단(앵커 리드)에는 자막줄을 넣지 마십시오")
+        for sp in spans:
+            n = len(re.sub(r"\s+", " ", sp.group(2)).strip())
+            if n > SPAN_MAX:
+                problems.append(f"{sp.group(1)}번 구간이 {n}자로 너무 깁니다({SPAN_MAX}자 이하로 줄이십시오)")
+        rest = re.sub(r"\{(\d+)\}.*?\{/\1\}", "", para, flags=re.S)
+        rest = re.sub(r"[\s\.,'\"“”‘’]", "", re.sub(r"\{/?\d+\}", "", rest))
+        if len(rest) < 5:
+            problems.append(f"{i + 1}문단 전체에 자막줄이 걸려 있습니다. 밑줄 없는 부분을 남기십시오")
+        for a, b in zip(spans, spans[1:]):
+            gap = re.sub(r"\s", "", para[a.end():b.start()])
+            if len(gap) < 5:
+                problems.append(f"{a.group(1)}번과 {b.group(1)}번 구간 사이에 틈이 없습니다")
+    return problems
+
+
 def analyze_body(text):
     """본문(마커 사이)의 글자 수(공백 포함, 단락 사이 줄바꿈 제외)와 단락 수."""
     m = re.search(re.escape(BODY_START) + r"\s*(.*?)\s*" + re.escape(BODY_END), text, re.S)
@@ -380,7 +411,8 @@ def build_prompt(article_num, rep_name, staff_str, target_rt_opt, para_count,
 
 [★ 자막줄 규칙 ★]:
 - 자막줄은 핵심 구절 강조가 아닙니다. 뉴스 녹화 때 PD가 원고를 보며 자막(CG)을 화면에 띄우는 위치 신호입니다. 밑줄 시작 지점에서 해당 자막이 들어가고(IN), 밑줄이 끝나는 지점에서 빠집니다(OUT).
-- 따라서 각 구간은 시청자가 자막을 읽을 수 있도록 최소 한 문장 안팎(약 3초 이상) 길이로 잡고, 그 자막의 내용이 실제로 읽히는 시점에 맞춥니다.
+- 각 구간은 공백 포함 {SPAN_MIN}~{SPAN_MAX}자(약 2~6초)로 짧게 잡고, 그 자막의 내용이 실제로 읽히는 구절에 맞춥니다. 문장 전체나 단락 전체를 덮지 마십시오.
+- 구간과 구간 사이에는 밑줄 없는 본문을 반드시 남겨, 자막을 빼고 다음 자막을 넣을 틈을 만드십시오.
 - 첫 단락(앵커 리드)은 자막이 없으므로 표시하지 않습니다. 둘째 단락부터 자막이 나가는 순서대로 본문 구간을 {{1}}...{{/1}}, {{2}}...{{/2}} 처럼 번호 붙은 중괄호로 감쌉니다.
 - 아래 출력 양식의 자막 목록(자막 블록)도 같은 순서·같은 번호로 줄 맨 앞에 {{1}}, {{2}}를 붙입니다. 자막 개수와 본문 구간 개수는 반드시 같아야 합니다.
 - 첫 번째 자막은 행사명(또는 보고서명) 줄입니다.{staff_rule}
@@ -616,7 +648,7 @@ with col_out:
 
             contents = [{"role": "user", "text": prompt,
                          "media": media if (media and not source_text) else None}]
-            best = None  # (거리, 텍스트, 글자수, 단락수, 모델)
+            best = None  # (종합 거리, 텍스트, 글자수, 단락수, 모델, 분량 거리, 자막줄 문제)
             attempts = 0
             error = ""
 
@@ -639,19 +671,25 @@ with col_out:
                                 parts.append(f"{count - spec['hi']}자 이상 줄이십시오")
                             if n_paras != target_paras:
                                 parts.append(f"단락을 정확히 {target_paras}개로 맞추십시오")
-                            feedback = (
+                            feedback = "" if dist == 0 else (
                                 f"방금 원고의 본문은 공백 포함 {count}자, {n_paras}단락입니다. "
                                 f"목표는 {spec['lo']}~{spec['hi']}자, {target_paras}단락입니다. "
                                 + ", ".join(parts) + ". 사실관계와 문체 규칙은 유지하고 분량과 단락만 조정해, "
                                 "전체 출력 양식을 처음과 똑같이 다시 출력하십시오."
                             )
-                        if best is None or dist < best[0]:
-                            best = (dist, text, count, n_paras, used_model)
-                        if dist == 0:
+                        span_problems = check_spans(text) if count is not None else []
+                        total = dist + 10 * len(span_problems)
+                        if span_problems:
+                            feedback += (" 또한 자막줄을 고치십시오: " + "; ".join(span_problems)
+                                         + ". 각 자막 구간은 자막 내용이 읽히는 짧은 구절로 잡고 구간 사이에 틈을 두되, 본문 분량과 단락은 유지하고"
+                                         " 전체 출력 양식을 처음과 똑같이 다시 출력하십시오.")
+                        if best is None or total < best[0]:
+                            best = (total, text, count, n_paras, used_model, dist, span_problems)
+                        if total == 0:
                             break
                         contents = contents + [
                             {"role": "assistant", "text": text},
-                            {"role": "user", "text": feedback},
+                            {"role": "user", "text": feedback.strip()},
                         ]
                 except AIError as ex:
                     error = str(ex)
@@ -659,7 +697,7 @@ with col_out:
             if best is None:
                 st.session_state["result"] = {"error": error or "생성에 실패했습니다."}
             else:
-                dist, text, count, n_paras, used_model = best
+                _, text, count, n_paras, used_model, dist, span_problems = best
                 st.session_state["result"] = {
                     "text": finalize_text(text, article_num),
                     "marked": finalize_text(text, article_num, keep_marks=True),
@@ -667,6 +705,7 @@ with col_out:
                     "ok": dist == 0, "attempts": attempts,
                     "lo": spec["lo"], "hi": spec["hi"], "target_paras": target_paras,
                     "warn": error,
+                    "span_problems": span_problems,
                 }
                 write_log([
                     datetime.datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S"),
@@ -713,6 +752,8 @@ with col_out:
                     f"⚠️ 본문 {result['count']}자 / {result['paras']}단락으로 기준 "
                     f"({result['lo']}~{result['hi']}자, {result['target_paras']}단락)에 "
                     f"{result['attempts']}회 시도 후에도 맞지 않았습니다. 데스크에서 다듬어 주세요.")
+            if result.get("span_problems"):
+                st.caption("자막줄 참고: " + "; ".join(result["span_problems"]))
             if result.get("warn"):
                 st.caption(f"참고: {result['warn']}")
     else:
