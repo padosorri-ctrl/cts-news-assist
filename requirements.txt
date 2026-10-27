@@ -3,3 +3,4 @@ requests
 pdfplumber
 pypdf
 python-docx
+olefile
