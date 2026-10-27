@@ -413,18 +413,22 @@ with col_in:
             provider_str = f"자료제공 {provider_input}" if provider_input else "자료제공"
         else:
             cam_list = st.multiselect(
-                "🎥 영상취재 기자 선택 (중복 가능)",
-                ["전승민", "전용완", "김효근", "김대상", "우태림", "오현택"],
+                "🎥 영상취재 기자 (선택 또는 직접 입력 후 Enter, 중복 가능)",
+                ["전승민", "전용완", "김효근", "김대상", "우태림"],
                 default=[],
+                accept_new_options=True,
+                placeholder="선택하거나 이름을 직접 입력",
             )
             cam_str = " ".join(cam_list)
             source_input = st.text_input("자료출처 표기 (선택)", placeholder="필요시 기재 (예: 유튜브 채널명 등)")
 
     with c6:
         edit_list = st.multiselect(
-            "✂️ 영상편집 기자 선택 (중복 가능)",
+            "✂️ 영상편집 기자 (선택 또는 직접 입력 후 Enter, 중복 가능)",
             ["최신영", "서혜원", "강성민"],
             default=[],
+            accept_new_options=True,
+            placeholder="선택하거나 이름을 직접 입력",
         )
         edit_str = " ".join(edit_list)
 
