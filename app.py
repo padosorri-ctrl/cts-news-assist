@@ -253,8 +253,6 @@ def analyze_body(text):
 
 TITLE_BODY_PT = 15   # 제목·기사 본문 글자 크기(pt)
 CAPTION_PT = 10      # 자막 이하 글자 크기(pt)
-CAPTION_COLORS = ["#d62728", "#1f4eff", "#2a8a2a", "#e07b00"]
-CIRCLED = ["①", "②", "③", "④", "⑤", "⑥"]
 
 
 def strip_marks(text):
@@ -264,21 +262,11 @@ def strip_marks(text):
 
 
 def render_marked_html(text):
-    """본문의 자막 해당 구간에 밑줄·번호를, 자막 줄에 같은 색·번호를 입혀 HTML로 만든다."""
+    """본문의 자막 해당 구간에 밑줄을 긋는다(색·번호 없음). 복사해 붙이면 검정 글씨로 들어간다."""
     import html as html_lib
 
-    def color(n):
-        return CAPTION_COLORS[(int(n) - 1) % len(CAPTION_COLORS)]
-
-    def circ(n):
-        i = int(n) - 1
-        return CIRCLED[i] if 0 <= i < len(CIRCLED) else f"({n})"
-
     def span(m):
-        n, inner = m.group(1), m.group(2)
-        return (f'<u style="text-decoration-color:{color(n)};text-decoration-thickness:2px;'
-                f'text-underline-offset:4px">{inner}</u>'
-                f'<sup style="color:{color(n)};font-weight:700">{circ(n)}</sup>')
+        return f'<u style="text-decoration-thickness:1.5px;text-underline-offset:4px">{m.group(2)}</u>'
 
     def convert(chunk):
         out = []
@@ -287,10 +275,7 @@ def render_marked_html(text):
             if re.search(r"\{/\d+\}", esc):
                 esc = re.sub(r"\{(\d+)\}(.*?)\{/\1\}", span, esc)
             else:
-                cm = re.match(r"^\s*\{(\d+)\}\s*(.*)$", esc)
-                if cm:
-                    n = cm.group(1)
-                    esc = (f'<span style="color:{color(n)};font-weight:700">{circ(n)} {cm.group(2)}</span>')
+                esc = re.sub(r"^\s*\{\d+\}\s*", "", esc)  # 자막 줄 머리의 번호 표시 제거
             out.append(esc)
         return "\n".join(out)
 
@@ -301,8 +286,8 @@ def render_marked_html(text):
     if lower.strip():
         html_out += (f'<div style="font-size:{CAPTION_PT}pt;white-space:pre-wrap;line-height:1.7;'
                      f'margin-top:14px">{convert(lower.strip())}</div>')
-    return ('<div style="border:1px solid rgba(128,128,128,.35);border-radius:8px;padding:16px 18px;'
-            'max-height:620px;overflow:auto">' + html_out + '</div>')
+    return ('<div style="background:#ffffff;color:#000000;border:1px solid rgba(128,128,128,.35);'
+            'border-radius:8px;padding:16px 18px;max-height:620px;overflow:auto">' + html_out + '</div>')
 
 
 def finalize_text(text, article_num, keep_marks=False):
@@ -313,6 +298,10 @@ def finalize_text(text, article_num, keep_marks=False):
     text = re.sub(r"\n?[ \t]*" + re.escape(BODY_END) + r"[ \t]*", "\u0001" if keep_marks else "", text)
     text = text.replace("[", "").replace("]", "")
     text = text.replace(token, article_num)
+    lines = text.strip().split("\n")
+    if len(lines) > 1 and lines[1].strip():  # 제목과 본문 사이는 반드시 한 줄 띄운다
+        lines.insert(1, "")
+    text = "\n".join(lines)
     if not keep_marks:
         text = strip_marks(text)
     text = re.sub(r"\n{3,}", "\n\n", text)
@@ -504,11 +493,11 @@ with col_in:
         edit_str = " ".join(edit_list)
 
     staff_lines = []
+    if use_provider:
+        staff_lines.append(f"자료제공 {provider_input}" if provider_input else "자료제공")
     if use_cam:
         cam_str = " ".join(cam_list)
         staff_lines.append(f"영상취재 {cam_str}" if cam_str else "영상취재")
-    if use_provider:
-        staff_lines.append(f"자료제공 {provider_input}" if provider_input else "자료제공")
     if edit_str:
         staff_lines.append(f"영상편집 {edit_str}")
     staff_str = "\n".join(staff_lines)
@@ -672,7 +661,7 @@ with col_out:
                             index=0 if has_marks else 1, label_visibility="collapsed")
             if view == views[0]:
                 if has_marks:
-                    st.caption("본문의 밑줄 구간과 같은 색·번호의 자막이 매칭됩니다. 드래그해서 복사하면 밑줄이 그대로 붙습니다.")
+                    st.caption("밑줄 친 본문 구간이 아래 자막 순서와 매칭됩니다. 드래그해서 복사하면 밑줄과 글자 크기가 그대로 붙습니다.")
                     st.markdown(render_marked_html(result["marked"]), unsafe_allow_html=True)
                 else:
                     st.info("이번 결과에는 자막 매칭 표시가 없어 일반 텍스트로 보여 드립니다.")
