@@ -245,19 +245,76 @@ def analyze_body(text):
     m = re.search(re.escape(BODY_START) + r"\s*(.*?)\s*" + re.escape(BODY_END), text, re.S)
     if not m:
         return None, None
-    paras = [p for p in re.split(r"\n\s*\n", m.group(1)) if p.strip()]
+    body = re.sub(r"\{/?\d+\}", "", m.group(1))  # 자막줄 표시는 글자 수에서 제외
+    paras = [p for p in re.split(r"\n\s*\n", body) if p.strip()]
     paras = [re.sub(r"\s*\n\s*", " ", p).strip() for p in paras]
     return sum(len(p) for p in paras), len(paras)
 
 
-def finalize_text(text, article_num):
-    """마커 제거, 대괄호 제거(헤더 순번 표기는 보존), 빈 줄 정리."""
+TITLE_BODY_PT = 15   # 제목·기사 본문 글자 크기(pt)
+CAPTION_PT = 10      # 자막 이하 글자 크기(pt)
+CAPTION_COLORS = ["#d62728", "#1f4eff", "#2a8a2a", "#e07b00"]
+CIRCLED = ["①", "②", "③", "④", "⑤", "⑥"]
+
+
+def strip_marks(text):
+    """자막줄 표시({1}...{/1}, 자막 줄 머리의 {1})를 지워 깨끗한 원고로 만든다."""
+    text = re.sub(r"(?m)^[ \t]*\{\d+\}[ \t]*", "", text)
+    return re.sub(r"\{/?\d+\}", "", text)
+
+
+def render_marked_html(text):
+    """본문의 자막 해당 구간에 밑줄·번호를, 자막 줄에 같은 색·번호를 입혀 HTML로 만든다."""
+    import html as html_lib
+
+    def color(n):
+        return CAPTION_COLORS[(int(n) - 1) % len(CAPTION_COLORS)]
+
+    def circ(n):
+        i = int(n) - 1
+        return CIRCLED[i] if 0 <= i < len(CIRCLED) else f"({n})"
+
+    def span(m):
+        n, inner = m.group(1), m.group(2)
+        return (f'<u style="text-decoration-color:{color(n)};text-decoration-thickness:2px;'
+                f'text-underline-offset:4px">{inner}</u>'
+                f'<sup style="color:{color(n)};font-weight:700">{circ(n)}</sup>')
+
+    def convert(chunk):
+        out = []
+        for line in chunk.split("\n"):
+            esc = html_lib.escape(line, quote=False)
+            if re.search(r"\{/\d+\}", esc):
+                esc = re.sub(r"\{(\d+)\}(.*?)\{/\1\}", span, esc)
+            else:
+                cm = re.match(r"^\s*\{(\d+)\}\s*(.*)$", esc)
+                if cm:
+                    n = cm.group(1)
+                    esc = (f'<span style="color:{color(n)};font-weight:700">{circ(n)} {cm.group(2)}</span>')
+            out.append(esc)
+        return "\n".join(out)
+
+    # 제목·본문은 15pt, 자막 이하는 10pt
+    upper, _, lower = text.partition("\u0001")
+    html_out = (f'<div style="font-size:{TITLE_BODY_PT}pt;white-space:pre-wrap;line-height:1.7">'
+                f'{convert(upper.rstrip())}</div>')
+    if lower.strip():
+        html_out += (f'<div style="font-size:{CAPTION_PT}pt;white-space:pre-wrap;line-height:1.7;'
+                     f'margin-top:14px">{convert(lower.strip())}</div>')
+    return ('<div style="border:1px solid rgba(128,128,128,.35);border-radius:8px;padding:16px 18px;'
+            'max-height:620px;overflow:auto">' + html_out + '</div>')
+
+
+def finalize_text(text, article_num, keep_marks=False):
+    """마커 제거, 대괄호 제거(헤더 순번 표기는 보존), 빈 줄 정리. keep_marks면 자막줄 표시를 남긴다."""
     token = "\u0000HEADER\u0000"
     text = text.replace(article_num, token)
     text = re.sub(r"[ \t]*" + re.escape(BODY_START) + r"[ \t]*\n?", "", text)
-    text = re.sub(r"\n?[ \t]*" + re.escape(BODY_END) + r"[ \t]*", "", text)
+    text = re.sub(r"\n?[ \t]*" + re.escape(BODY_END) + r"[ \t]*", "\u0001" if keep_marks else "", text)
     text = text.replace("[", "").replace("]", "")
     text = text.replace(token, article_num)
+    if not keep_marks:
+        text = strip_marks(text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
 
@@ -309,6 +366,12 @@ def build_prompt(article_num, rep_name, staff_str, target_rt_opt, para_count,
 - 보고서명, 저작물, 조례명 등 고유명사는 작은따옴표로 표기하십시오.
 - 현장 행사는 슬래시로 표기하십시오. (예: 새문안교회 2026 광복주일찬양예배 // 9일 / 서울 종로구)
 
+[★ 자막줄 규칙 ★]:
+- 방송 화면에 자막(CG)으로 들어갈 핵심 문구를 2~4개 정하고, 각 자막에 대응하는 본문 구간(한 문장 이내, 본문 문장을 그대로 사용)을 표시하십시오.
+- 본문 속 해당 구간의 앞뒤를 {{1}}...{{/1}}, {{2}}...{{/2}} 처럼 번호가 붙은 중괄호 표시로 감싸십시오. 번호는 본문에 나오는 순서대로 1부터 매깁니다. 구간끼리 겹치거나 단락 경계를 넘으면 안 됩니다.
+- 아래 출력 양식의 자막 줄에는 같은 번호를 줄 맨 앞에 {{1}}, {{2}} 형태로 적고, 그 구간을 압축한 자막 문구(25자 내외)를 쓰십시오. 자막 문구는 본문 구간의 사실과 일치해야 합니다.
+- 이 중괄호 표시는 글자 수에 포함되지 않으며, 기호 사용 금지 규칙의 예외입니다.
+
 [★ 단락 구성 규칙 ★]:
 - 본문은 정확히 {para_count[0]}개 단락으로 구성합니다.
 - 단락은 내용의 의도와 흐름(도입, 세부, 인용, 전망 등)에 따라 직접 판단해 나누십시오. 단락당 문장 수는 정해져 있지 않으며, 한 단락에 여러 문장이 들어가도 됩니다.
@@ -318,11 +381,12 @@ def build_prompt(article_num, rep_name, staff_str, target_rt_opt, para_count,
 {article_num} 기사 메인 타이틀{f" ({rep_name})" if rep_name else ""}
 
 {BODY_START}
-(본문 {para_count[0]}단락. 마커 두 줄은 반드시 그대로 출력)
+(본문 {para_count[0]}단락, 자막 대응 구간은 {{1}}...{{/1}} 형태로 표시. 마커 두 줄은 반드시 그대로 출력)
 {BODY_END}
 
 '특정보고서명' 발간 (또는 행사명 // 일시 / 장소)
-핵심 요약 자막 1줄 (주요 통계 또는 인용구)
+{{1}} 자막 문구 (본문 {{1}} 구간 요약)
+{{2}} 자막 문구 (본문 {{2}} 구간 요약, 필요하면 {{3}}, {{4}}까지)
 {staff_str}
 
 교단 키워드 : 예장통합, 기감 등 (없으면 X)
@@ -403,15 +467,20 @@ with col_in:
         )
 
     st.markdown("---")
-    credit_type = st.radio("영상 구분", ["자료제공", "현장취재 (영상취재)"], horizontal=True)
+    credit_types = st.multiselect(
+        "영상 구분 (중복 선택 가능)", ["자료제공", "현장취재 (영상취재)"],
+        default=[], placeholder="해당하는 구분을 선택하세요",
+    )
+    use_provider = "자료제공" in credit_types
+    use_cam = "현장취재 (영상취재)" in credit_types
 
     c5, c6 = st.columns([1, 1])
+    provider_input = ""
+    cam_list = []
     with c5:
-        if credit_type == "자료제공":
-            provider_input = st.text_input("자료제공처 입력", placeholder="예: 목회데이터연구소, 한국교회총연합 등")
-            source_input = st.text_input("자료출처 표기 (선택)", placeholder="예: 화면제공 유튜브, 현장 녹화본 등")
-            provider_str = f"자료제공 {provider_input}" if provider_input else "자료제공"
-        else:
+        if use_provider:
+            provider_input = st.text_input("자료제공처 입력", placeholder="예: 목회데이터연구소, 한국교회총연합 등").strip()
+        if use_cam:
             cam_list = st.multiselect(
                 "🎥 영상취재 기자 (선택 또는 직접 입력 후 Enter, 중복 가능)",
                 ["전승민", "전용완", "김효근", "김대상", "우태림"],
@@ -419,8 +488,10 @@ with col_in:
                 accept_new_options=True,
                 placeholder="선택하거나 이름을 직접 입력",
             )
-            cam_str = " ".join(cam_list)
-            source_input = st.text_input("자료출처 표기 (선택)", placeholder="필요시 기재 (예: 유튜브 채널명 등)")
+        if credit_types:
+            source_input = st.text_input("자료출처 표기 (선택)", placeholder="필요시 기재 (예: 화면제공 유튜브, 현장 녹화본 등)")
+        else:
+            source_input = ""
 
     with c6:
         edit_list = st.multiselect(
@@ -432,14 +503,18 @@ with col_in:
         )
         edit_str = " ".join(edit_list)
 
-    edit_line = f"\n영상편집 {edit_str}" if edit_str else ""
-    if credit_type == "자료제공":
-        staff_str = f"{provider_str}{edit_line}"
-    else:
-        cam_line = f"영상취재 {cam_str}" if cam_str else "영상취재"
-        staff_str = f"{cam_line}{edit_line}"
+    staff_lines = []
+    if use_cam:
+        cam_str = " ".join(cam_list)
+        staff_lines.append(f"영상취재 {cam_str}" if cam_str else "영상취재")
+    if use_provider:
+        staff_lines.append(f"자료제공 {provider_input}" if provider_input else "자료제공")
+    if edit_str:
+        staff_lines.append(f"영상편집 {edit_str}")
+    staff_str = "\n".join(staff_lines)
     if source_input:
         staff_str += f"\n(자료출처: {source_input})"
+    staff_str = staff_str.strip()
 
     st.markdown("---")
     custom_instruction = st.text_input(
@@ -574,6 +649,7 @@ with col_out:
                 dist, text, count, n_paras, used_model = best
                 st.session_state["result"] = {
                     "text": finalize_text(text, article_num),
+                    "marked": finalize_text(text, article_num, keep_marks=True),
                     "count": count, "paras": n_paras, "model": used_model,
                     "ok": dist == 0, "attempts": attempts,
                     "lo": spec["lo"], "hi": spec["hi"], "target_paras": target_paras,
@@ -590,8 +666,24 @@ with col_out:
         if "error" in result:
             st.error(f"생성 실패: {result['error']}")
         else:
-            st.text_area("완성된 단신 기사 (복사하여 전체 원고에 사용)",
-                         value=result["text"], height=470)
+            has_marks = bool(re.search(r"\{\d+\}", result.get("marked", "")))
+            views = ["자막줄 보기 (밑줄 표시)", "편집용 텍스트", "줄 번호 보기"]
+            view = st.radio("보기 방식", views, horizontal=True,
+                            index=0 if has_marks else 1, label_visibility="collapsed")
+            if view == views[0]:
+                if has_marks:
+                    st.caption("본문의 밑줄 구간과 같은 색·번호의 자막이 매칭됩니다. 드래그해서 복사하면 밑줄이 그대로 붙습니다.")
+                    st.markdown(render_marked_html(result["marked"]), unsafe_allow_html=True)
+                else:
+                    st.info("이번 결과에는 자막 매칭 표시가 없어 일반 텍스트로 보여 드립니다.")
+                    st.text_area("완성된 단신 기사 (복사하여 전체 원고에 사용)",
+                                 value=result["text"], height=470)
+            elif view == views[1]:
+                st.text_area("완성된 단신 기사 (복사하여 전체 원고에 사용)",
+                             value=result["text"], height=470)
+            else:
+                st.caption("줄 번호 보기 · 오른쪽 위 복사 버튼으로 전체 복사")
+                st.code(result["text"], language=None, line_numbers=True, wrap_lines=True, height=470)
             if result["count"] is None:
                 st.warning("본문 구간을 인식하지 못해 글자 수를 검수하지 못했습니다. 직접 확인해 주세요.")
             elif result["ok"]:
