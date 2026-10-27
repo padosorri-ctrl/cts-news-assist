@@ -4,6 +4,7 @@ import datetime
 import hmac
 import os
 import re
+import threading
 import time
 
 import requests
@@ -343,16 +344,33 @@ def finalize_text(text, article_num, keep_marks=False):
     return text.strip()
 
 
+LOG_HEADER = ["시각(KST)", "월", "기사순번", "담당기자", "분량", "본문글자수", "단락수", "AI호출수",
+              "분량기준충족", "자막줄문제수", "결과", "오류내용", "모델"]
+
+
+def _send_to_sheet(url, token, row):
+    try:
+        requests.post(url, json={"token": token, "row": row}, timeout=15)
+    except Exception:
+        pass
+
+
 def write_log(row):
+    """사용 이력을 서버 CSV와 (설정돼 있으면) 구글 시트에 함께 남긴다."""
+    row = ["" if v is None else v for v in row]
     try:
         new = not os.path.exists(LOG_PATH)
         with open(LOG_PATH, "a", newline="", encoding="utf-8-sig") as f:
             w = csv.writer(f)
             if new:
-                w.writerow(["시각(KST)", "기사순번", "담당기자", "분량", "모델", "본문글자수", "단락수", "시도횟수", "기준충족"])
+                w.writerow(LOG_HEADER)
             w.writerow(row)
     except Exception:
         pass
+    url = get_secret("SHEET_WEBHOOK_URL")
+    token = get_secret("SHEET_TOKEN")
+    if url and token:  # 화면이 기다리지 않도록 뒤에서 전송
+        threading.Thread(target=_send_to_sheet, args=(url, token, row), daemon=True).start()
 
 
 def build_prompt(article_num, rep_name, staff_str, target_rt_opt, para_count,
@@ -702,8 +720,12 @@ with col_out:
                 except AIError as ex:
                     error = str(ex)
 
+            now = datetime.datetime.now(KST)
+            log_head = [now.strftime("%Y-%m-%d %H:%M:%S"), now.strftime("%Y-%m"),
+                        article_num, rep_name or "미입력", target_rt_opt]
             if best is None:
                 st.session_state["result"] = {"error": error or "생성에 실패했습니다."}
+                write_log(log_head + ["", "", attempts, "", "", "실패", error or "생성 실패", ""])
             else:
                 _, text, count, n_paras, used_model, dist, span_problems = best
                 st.session_state["result"] = {
@@ -715,10 +737,9 @@ with col_out:
                     "warn": error,
                     "span_problems": span_problems,
                 }
-                write_log([
-                    datetime.datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S"),
-                    article_num, rep_name, target_rt_opt, used_model,
+                write_log(log_head + [
                     count, n_paras, attempts, "Y" if dist == 0 else "N",
+                    len(span_problems), "성공", error, used_model,
                 ])
                 st.rerun()  # 사이드바의 사용 이력 건수를 바로 갱신
 
