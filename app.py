@@ -511,6 +511,30 @@ with st.sidebar:
                            file_name="usage_log.csv", mime="text/csv")
     else:
         st.caption("아직 기록이 없습니다. 서버가 재시작되면 기록이 초기화되며, 그 뒤 생성한 원고부터 쌓입니다.")
+    with st.expander("🔗 구글 시트 연결 확인"):
+        sheet_url = str(get_secret("SHEET_WEBHOOK_URL") or "").strip()
+        sheet_token = str(get_secret("SHEET_TOKEN") or "").strip()
+        if not sheet_url or not sheet_token:
+            st.warning("Secrets에 SHEET_WEBHOOK_URL 또는 SHEET_TOKEN이 없습니다.")
+        elif not sheet_url.startswith("https://script.google.com/"):
+            st.warning("SHEET_WEBHOOK_URL이 웹 앱 주소(https://script.google.com/…/exec)가 아닙니다.")
+        elif st.button("시트에 테스트 기록 보내기"):
+            now = datetime.datetime.now(KST)
+            row = [now.strftime("%Y-%m-%d %H:%M:%S"), now.strftime("%Y-%m"), "연결 테스트", "", "",
+                   "", "", "", "", "", "테스트", "", ""]
+            try:
+                r = requests.post(sheet_url, json={"token": sheet_token, "row": row}, timeout=20)
+                body = r.text[:300]
+                if '"ok":true' in body.replace(" ", ""):
+                    st.success("연결 성공: 시트 사용이력 탭에 '연결 테스트' 줄이 추가됐습니다.")
+                elif "bad token" in body:
+                    st.error("토큰이 다릅니다. Secrets의 SHEET_TOKEN과 Apps Script 코드의 TOKEN을 같게 맞춰 주세요.")
+                elif "<html" in body.lower() or "accounts.google" in r.url:
+                    st.error("웹 앱 접근이 막혀 있습니다. Apps Script 배포 시 액세스를 '모든 사용자'로 했는지 확인하고, 새 배포 후 새 주소를 넣어 주세요.")
+                else:
+                    st.error(f"응답 확인 필요 (HTTP {r.status_code}): {body}")
+            except Exception as ex:
+                st.error(f"전송 실패: {ex}")
     if st.button("로그아웃"):
         st.session_state["authenticated"] = False
         st.rerun()
