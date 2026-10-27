@@ -276,16 +276,20 @@ def render_marked_html(text):
                 esc = re.sub(r"\{(\d+)\}(.*?)\{/\1\}", span, esc)
             else:
                 esc = re.sub(r"^\s*\{\d+\}\s*", "", esc)  # 자막 줄 머리의 번호 표시 제거
-            out.append(esc)
-        return "\n".join(out)
+            if esc.strip() or (out and out[-1] != ""):  # 빈 줄은 한 줄만 남김
+                out.append(esc if esc.strip() else "")
+        while out and out[-1] == "":
+            out.pop()
+        # 줄바꿈을 <br>로 명시해 화면 변환 과정에서 빈 줄이 사라지지 않게 한다
+        return "<br>".join(out)
 
     # 제목·본문은 15pt, 자막 이하는 10pt
     upper, _, lower = text.partition("\u0001")
-    html_out = (f'<div style="font-size:{TITLE_BODY_PT}pt;white-space:pre-wrap;line-height:1.7">'
+    html_out = (f'<div style="font-size:{TITLE_BODY_PT}pt;line-height:1.7">'
                 f'{convert(upper.rstrip())}</div>')
     if lower.strip():
-        html_out += (f'<div style="font-size:{CAPTION_PT}pt;white-space:pre-wrap;line-height:1.7;'
-                     f'margin-top:14px">{convert(lower.strip())}</div>')
+        html_out += (f'<div style="font-size:{CAPTION_PT}pt;line-height:1.7">'
+                     f'<br>{convert(lower.strip())}</div>')
     return ('<div style="background:#ffffff;color:#000000;border:1px solid rgba(128,128,128,.35);'
             'border-radius:8px;padding:16px 18px;max-height:620px;overflow:auto">' + html_out + '</div>')
 
@@ -323,6 +327,25 @@ def write_log(row):
 def build_prompt(article_num, rep_name, staff_str, target_rt_opt, para_count,
                  custom_instruction, source_text, has_media):
     spec = RT_SPEC[target_rt_opt]
+    staff_lines = [l for l in staff_str.split("\n") if l.strip()]
+    if staff_lines:
+        staff_rule = (" 스태프 표기(자료제공·영상취재·영상편집 등)도 하나의 자막으로 취급하여 끝에서 두 번째 자막 자리에 두고,"
+                      " 그 첫 줄 앞에만 번호를 붙이며 문구는 주어진 그대로 씁니다.")
+        caption_block = "\n".join([
+            "{1} '특정보고서명' 발간 (또는 행사명 // 일시 / 장소)",
+            "{2} 자막 문구 (본문 {2} 구간 내용)",
+            "{3} 자막 문구 (본문 {3} 구간 내용, 필요하면 자막을 더 추가)",
+            "{4} " + staff_lines[0],
+            *staff_lines[1:],
+            "{5} 마지막 자막 문구 (본문 {5} 구간 내용)",
+        ])
+    else:
+        staff_rule = ""
+        caption_block = "\n".join([
+            "{1} '특정보고서명' 발간 (또는 행사명 // 일시 / 장소)",
+            "{2} 자막 문구 (본문 {2} 구간 내용)",
+            "{3} 자막 문구 (본문 {3} 구간 내용, 필요하면 자막을 더 추가)",
+        ])
     if source_text:
         source_block = f"[보도자료 원문 텍스트]:\n{source_text}"
     else:
@@ -356,9 +379,13 @@ def build_prompt(article_num, rep_name, staff_str, target_rt_opt, para_count,
 - 현장 행사는 슬래시로 표기하십시오. (예: 새문안교회 2026 광복주일찬양예배 // 9일 / 서울 종로구)
 
 [★ 자막줄 규칙 ★]:
-- 방송 화면에 자막(CG)으로 들어갈 핵심 문구를 2~4개 정하고, 각 자막에 대응하는 본문 구간(한 문장 이내, 본문 문장을 그대로 사용)을 표시하십시오.
-- 본문 속 해당 구간의 앞뒤를 {{1}}...{{/1}}, {{2}}...{{/2}} 처럼 번호가 붙은 중괄호 표시로 감싸십시오. 번호는 본문에 나오는 순서대로 1부터 매깁니다. 구간끼리 겹치거나 단락 경계를 넘으면 안 됩니다.
-- 아래 출력 양식의 자막 줄에는 같은 번호를 줄 맨 앞에 {{1}}, {{2}} 형태로 적고, 그 구간을 압축한 자막 문구(25자 내외)를 쓰십시오. 자막 문구는 본문 구간의 사실과 일치해야 합니다.
+- 자막줄은 핵심 구절 강조가 아닙니다. 뉴스 녹화 때 PD가 원고를 보며 자막(CG)을 화면에 띄우는 위치 신호입니다. 밑줄 시작 지점에서 해당 자막이 들어가고(IN), 밑줄이 끝나는 지점에서 빠집니다(OUT).
+- 따라서 각 구간은 시청자가 자막을 읽을 수 있도록 최소 한 문장 안팎(약 3초 이상) 길이로 잡고, 그 자막의 내용이 실제로 읽히는 시점에 맞춥니다.
+- 첫 단락(앵커 리드)은 자막이 없으므로 표시하지 않습니다. 둘째 단락부터 자막이 나가는 순서대로 본문 구간을 {{1}}...{{/1}}, {{2}}...{{/2}} 처럼 번호 붙은 중괄호로 감쌉니다.
+- 아래 출력 양식의 자막 목록(자막 블록)도 같은 순서·같은 번호로 줄 맨 앞에 {{1}}, {{2}}를 붙입니다. 자막 개수와 본문 구간 개수는 반드시 같아야 합니다.
+- 첫 번째 자막은 행사명(또는 보고서명) 줄입니다.{staff_rule}
+- 각 구간은 그 자막 내용이 읽히는 문장 또는 문장 일부로 잡고, 구간끼리 겹치거나 단락을 넘지 않게 합니다. 구간은 본문 흐름을 따라 고르게 배치합니다.
+- 자막 문구는 25자 내외로, 해당 구간의 사실과 일치해야 합니다.
 - 이 중괄호 표시는 글자 수에 포함되지 않으며, 기호 사용 금지 규칙의 예외입니다.
 
 [★ 단락 구성 규칙 ★]:
@@ -370,13 +397,10 @@ def build_prompt(article_num, rep_name, staff_str, target_rt_opt, para_count,
 {article_num} 기사 메인 타이틀{f" ({rep_name})" if rep_name else ""}
 
 {BODY_START}
-(본문 {para_count[0]}단락, 자막 대응 구간은 {{1}}...{{/1}} 형태로 표시. 마커 두 줄은 반드시 그대로 출력)
+(본문 {para_count[0]}단락. 둘째 단락부터 자막 노출 구간을 {{1}}...{{/1}} 형태로 표시. 마커 두 줄은 반드시 그대로 출력)
 {BODY_END}
 
-'특정보고서명' 발간 (또는 행사명 // 일시 / 장소)
-{{1}} 자막 문구 (본문 {{1}} 구간 요약)
-{{2}} 자막 문구 (본문 {{2}} 구간 요약, 필요하면 {{3}}, {{4}}까지)
-{staff_str}
+{caption_block}
 
 교단 키워드 : 예장통합, 기감 등 (없으면 X)
 인물 키워드 : 주요 인물 쉼표 구분 (없으면 X)
@@ -662,7 +686,11 @@ with col_out:
             if view == views[0]:
                 if has_marks:
                     st.caption("밑줄 친 본문 구간이 아래 자막 순서와 매칭됩니다. 드래그해서 복사하면 밑줄과 글자 크기가 그대로 붙습니다.")
-                    st.markdown(render_marked_html(result["marked"]), unsafe_allow_html=True)
+                    st.html(render_marked_html(result["marked"]))
+                    n_spans = len(set(re.findall(r"\{/(\d+)\}", result["marked"])))
+                    n_caps = len(re.findall(r"(?m)^\s*\{\d+\}(?!.*\{/\d+\})", result["marked"]))
+                    if n_spans != n_caps:
+                        st.caption(f"참고: 자막 {n_caps}개, 밑줄 구간 {n_spans}개로 수가 맞지 않습니다. 확인해 주세요.")
                 else:
                     st.info("이번 결과에는 자막 매칭 표시가 없어 일반 텍스트로 보여 드립니다.")
                     st.text_area("완성된 단신 기사 (복사하여 전체 원고에 사용)",
