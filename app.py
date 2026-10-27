@@ -241,6 +241,7 @@ def call_ai(engine, api_key, turns, models):
     return fn(api_key, turns, models)
 
 
+PREVIEW_TAG = "[예고자막]"  # 아직 열리지 않은 행사의 첫 자막 머리표
 SPAN_MIN, SPAN_MAX = 10, 40  # 자막줄 한 구간의 권장 길이(공백 포함 글자 수)
 
 
@@ -329,11 +330,13 @@ def render_marked_html(text):
 def finalize_text(text, article_num, keep_marks=False):
     """마커 제거, 대괄호 제거(헤더 순번 표기는 보존), 빈 줄 정리. keep_marks면 자막줄 표시를 남긴다."""
     token = "\u0000HEADER\u0000"
+    preview_token = "\u0000PREVIEW\u0000"
     text = text.replace(article_num, token)
+    text = re.sub(r"\[\s*예고\s*자막\s*\]", preview_token, text)
     text = re.sub(r"[ \t]*" + re.escape(BODY_START) + r"[ \t]*\n?", "", text)
     text = re.sub(r"\n?[ \t]*" + re.escape(BODY_END) + r"[ \t]*", "\u0001" if keep_marks else "", text)
     text = text.replace("[", "").replace("]", "")
-    text = text.replace(token, article_num)
+    text = text.replace(token, article_num).replace(preview_token, PREVIEW_TAG)
     lines = text.strip().split("\n")
     if len(lines) > 1 and lines[1].strip():  # 제목과 본문 사이는 반드시 한 줄 띄운다
         lines.insert(1, "")
@@ -376,6 +379,8 @@ def write_log(row):
 def build_prompt(article_num, rep_name, staff_str, target_rt_opt, para_count,
                  custom_instruction, source_text, has_media):
     spec = RT_SPEC[target_rt_opt]
+    _now = datetime.datetime.now(KST)
+    today = f"{_now.year}년 {_now.month}월 {_now.day}일({'월화수목금토일'[_now.weekday()]})"
     staff_lines = [l for l in staff_str.split("\n") if l.strip()]
     if staff_lines:
         staff_rule = (" 스태프 표기(자료제공·영상취재·영상편집 등)도 하나의 자막으로 취급하여 끝에서 두 번째 자막 자리에 두고,"
@@ -423,9 +428,16 @@ def build_prompt(article_num, rep_name, staff_str, target_rt_opt, para_count,
 2. [절대 금지 사항]: "~복된 시간이 되길 기대를 모읍니다", "~은혜가 되길 바랍니다" 등 주관적이거나 종교적인 기원문, 감상적 맺음말은 기사 본문에 절대 쓰지 마십시오. 오직 드라이한 팩트 위주의 언론사 보도국 톤을 완벽히 유지하십시오.
 
 [★ 기호 사용 금지 규칙 ★]:
-- 기사 본문, 바자막(CG), 썸네일 카피를 포함한 모든 출력물에서 대괄호 기호를 절대 사용하지 마십시오. (식별 헤더 "{article_num}"만 주어진 그대로 표기합니다.)
+- 기사 본문, 바자막(CG), 썸네일 카피를 포함한 모든 출력물에서 대괄호 기호를 절대 사용하지 마십시오. (식별 헤더 "{article_num}"와 예고 행사의 "[예고자막]" 표시만 예외입니다.)
 - 보고서명, 저작물, 조례명 등 고유명사는 작은따옴표로 표기하십시오.
 - 현장 행사는 슬래시로 표기하십시오. (예: 새문안교회 2026 광복주일찬양예배 // 9일 / 서울 종로구)
+
+[★ 예고 행사 규칙 ★]:
+- 오늘(원고 작성일)은 {today}입니다. 보도자료의 행사 날짜를 오늘과 비교하십시오.
+- 행사가 아직 열리지 않았다면(오늘 이후) 예고 기사입니다. 첫 번째 자막(행사명 줄) 맨 앞에 [예고자막]을 붙이고, 날짜는 월과 일을 모두 씁니다.
+  예: [예고자막] 제9회 KCFF 한국기독교영화제 // 11월 19 – 21일 / 서울 롯데시네마 월드타워점, 시그니엘 서울
+- 예고 기사의 본문은 "개최합니다", "열립니다", "~할 예정입니다"처럼 앞으로의 일로 씁니다. 이미 끝난 일처럼 쓰지 마십시오.
+- 행사가 이미 열렸다면(오늘 또는 이전) [예고자막]을 붙이지 않고 기존 형식을 따릅니다.
 
 [★ 자막줄 규칙 ★]:
 - 자막줄은 핵심 구절 강조가 아닙니다. 뉴스 녹화 때 PD가 원고를 보며 자막(CG)을 화면에 띄우는 위치 신호입니다. 밑줄 시작 지점에서 해당 자막이 들어가고(IN), 밑줄이 끝나는 지점에서 빠집니다(OUT).
