@@ -21,7 +21,9 @@ KST = datetime.timezone(datetime.timedelta(hours=9))
 LOG_PATH = "usage_log.csv"
 MAX_AUTH_FAILS = 5
 MAX_MEDIA_BYTES = 15 * 1024 * 1024
-DEFAULT_MODELS = ["gemini-2.5-flash", "gemini-2.0-flash"]
+MAX_CLAUDE_IMAGE_BYTES = 5 * 1024 * 1024
+CLAUDE_DEFAULT_MODELS = ["claude-sonnet-5-5", "claude-haiku-5-5"]
+GEMINI_FALLBACK_MODELS = ["gemini-2.5-flash", "gemini-2.0-flash"]
 MAX_ATTEMPTS = 3  # 최초 생성 + 분량 보정 재생성 2회
 
 
@@ -30,6 +32,14 @@ def get_secret(name, default=""):
         return st.secrets.get(name, default)
     except Exception:
         return default
+
+
+# 원고를 쓰는 AI: 기본은 Gemini. Secrets에 AI_ENGINE = "claude"를 넣으면 Claude를 쓴다.
+ENGINE = str(get_secret("AI_ENGINE", "gemini") or "gemini").strip().lower()
+if ENGINE not in ("gemini", "claude"):
+    ENGINE = "gemini"
+ENGINE_LABEL = "Claude" if ENGINE == "claude" else "Gemini"
+KEY_NAME = "ANTHROPIC_API_KEY" if ENGINE == "claude" else "GEMINI_API_KEY"
 
 
 # ------------------------------------------------------------------ 1. 보안 인증
@@ -81,18 +91,122 @@ RT_SPEC = {
 BODY_START, BODY_END = "<<본문시작>>", "<<본문끝>>"
 
 
-class GeminiError(Exception):
+class AIError(Exception):
     pass
 
 
-def call_gemini(api_key, contents, models):
-    """모델을 순서대로 시도한다. 키 오류는 즉시 중단, 일시 오류/모델 없음은 다음 모델로."""
+def _claude_messages(turns):
+    msgs = []
+    for t in turns:
+        if t["role"] == "assistant":
+            msgs.append({"role": "assistant", "content": t["text"]})
+            continue
+        blocks = []
+        if t.get("media"):
+            mime, data = t["media"]
+            blocks.append({
+                "type": "image" if mime.startswith("image/") else "document",
+                "source": {"type": "base64", "media_type": mime,
+                           "data": base64.b64encode(data).decode()},
+            })
+        blocks.append({"type": "text", "text": t["text"]})
+        msgs.append({"role": "user", "content": blocks})
+    return msgs
+
+
+def _gemini_contents(turns):
+    contents = []
+    for t in turns:
+        parts = []
+        if t.get("media"):
+            mime, data = t["media"]
+            parts.append({"inline_data": {"mime_type": mime,
+                                          "data": base64.b64encode(data).decode()}})
+        parts.append({"text": t["text"]})
+        contents.append({"role": "model" if t["role"] == "assistant" else "user", "parts": parts})
+    return contents
+
+
+def call_claude(api_key, turns, models):
+    """모델을 순서대로 시도한다. 키·결제 오류는 즉시 중단, 일시 오류/모델 없음은 다음 모델로."""
+    headers = {
+        "content-type": "application/json",
+        "x-api-key": api_key,
+        "anthropic-version": "2023-06-01",
+    }
+    messages = _claude_messages(turns)
+    last_err = ""
+    for model in models:
+        payload = {"model": model, "max_tokens": 2000, "messages": messages}
+        for attempt in range(2):
+            try:
+                res = requests.post("https://api.anthropic.com/v1/messages",
+                                    headers=headers, json=payload, timeout=90)
+            except requests.RequestException as ex:
+                last_err = f"{model}: 네트워크 오류 {ex}"
+                break
+            if res.status_code == 200:
+                data = res.json()
+                text = "".join(b.get("text", "") for b in data.get("content", [])
+                               if b.get("type") == "text")
+                if text.strip():
+                    return text, model
+                last_err = f"{model}: 응답이 비어 있습니다"
+                break
+            body = res.text[:300]
+            if res.status_code in (401, 403):
+                raise AIError(f"API 키 오류({res.status_code}). 키를 확인해 주세요. {body}")
+            if res.status_code == 400 and "credit balance" in res.text.lower():
+                raise AIError("Anthropic 계정의 API 크레딧이 부족합니다. 결제·충전 상태를 확인해 주세요.")
+            last_err = f"{model}: {res.status_code} {body}"
+            if res.status_code in (429, 500, 529) and attempt == 0:
+                time.sleep(3)
+                continue
+            break
+    raise AIError(last_err or "알 수 없는 오류")
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def discover_gemini_models(api_key):
+    """키로 쓸 수 있는 Gemini flash 계열 모델을 안정판 우선, 최신 버전 우선으로 정렬해 돌려준다."""
+    try:
+        res = requests.get("https://generativelanguage.googleapis.com/v1beta/models",
+                           headers={"x-goog-api-key": api_key},
+                           params={"pageSize": 200}, timeout=10)
+        if res.status_code != 200:
+            return []
+        names = []
+        for m in res.json().get("models", []):
+            name = m.get("name", "").replace("models/", "")
+            low = name.lower()
+            if "generateContent" not in m.get("supportedGenerationMethods", []):
+                continue
+            if "flash" not in low:
+                continue
+            if any(x in low for x in ("live", "tts", "image", "transcribe", "translate",
+                                      "embed", "audio", "robotics", "computer", "omni", "native")):
+                continue
+            names.append(name)
+    except Exception:
+        return []
+
+    def sort_key(n):
+        low = n.lower()
+        mv = re.search(r"gemini-(\d+(?:\.\d+)?)", low)
+        ver = float(mv.group(1)) if mv else 0.0
+        return (any(x in low for x in ("preview", "exp")), "lite" in low, -ver)
+
+    return sorted(set(names), key=sort_key)
+
+
+def call_gemini(api_key, turns, models):
+    """모델을 순서대로 시도한다. 키 오류는 즉시 중단, 한도·일시 오류/모델 없음은 다음 모델로."""
     headers = {"Content-Type": "application/json", "x-goog-api-key": api_key}
-    payload = {"contents": contents, "generationConfig": {"temperature": 0.3}}
+    payload = {"contents": _gemini_contents(turns), "generationConfig": {"temperature": 0.3}}
     last_err = ""
     for model in models:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-        for attempt in range(2):
+        for attempt in range(3):  # 한도·일시 오류는 잠시 기다렸다가 같은 모델로 최대 3번 시도
             try:
                 res = requests.post(url, headers=headers, json=payload, timeout=60)
             except requests.RequestException as ex:
@@ -108,13 +222,22 @@ def call_gemini(api_key, contents, models):
                     break
             body = res.text[:300]
             if res.status_code in (401, 403) or (res.status_code == 400 and "API key" in res.text):
-                raise GeminiError(f"API 키 오류({res.status_code}). 키를 확인해 주세요. {body}")
-            last_err = f"{model}: {res.status_code} {body}"
-            if res.status_code in (429, 500, 503) and attempt == 0:
-                time.sleep(3)
+                raise AIError(f"API 키 오류({res.status_code}). 키를 확인해 주세요. {body}")
+            if res.status_code == 402:
+                raise AIError("API 충전 잔액이 소진되어 일시 중단되었습니다. "
+                              "관리자에게 알려 AI Studio에서 충전하도록 해 주세요.")
+            last_err = (f"{model}: 사용 한도를 초과했습니다. 잠시 후 다시 시도해 주세요."
+                        if res.status_code == 429 else f"{model}: {res.status_code} {body}")
+            if res.status_code in (429, 500, 503) and attempt < 2:
+                time.sleep(4 * (attempt + 1))
                 continue
             break
-    raise GeminiError(last_err or "알 수 없는 오류")
+    raise AIError(last_err or "알 수 없는 오류")
+
+
+def call_ai(engine, api_key, turns, models):
+    fn = call_claude if engine == "claude" else call_gemini
+    return fn(api_key, turns, models)
 
 
 def analyze_body(text):
@@ -229,14 +352,14 @@ st.markdown("""
 st.markdown('<div class="main-title">🎙️ CTS 보도국 Style Assist Pro (단신 자동 생성 시스템)</div>',
             unsafe_allow_html=True)
 
-api_key = str(get_secret("GEMINI_API_KEY", "") or "")
+api_key = str(get_secret(KEY_NAME, "") or "")
 
 with st.sidebar:
     st.header("⚙️ 시스템")
     if not api_key:
-        api_key = st.text_input("Gemini API Key 입력", type="password")
+        api_key = st.text_input(f"{ENGINE_LABEL} API Key 입력", type="password")
     else:
-        st.caption("API 키: 서버 설정 사용 중")
+        st.caption(f"API 키: 서버 설정 사용 중 ({ENGINE_LABEL})")
     if os.path.exists(LOG_PATH):
         with open(LOG_PATH, "rb") as f:
             st.download_button("📊 사용 이력(CSV) 내려받기", f.read(),
@@ -345,9 +468,12 @@ with col_in:
                         msg += f" {res.note}"
                     st.session_state["file_msg"] = ("success", msg)
                 elif res.media:
-                    if len(res.media[1]) > MAX_MEDIA_BYTES:
+                    is_image = res.media[0].startswith("image/")
+                    limit = MAX_CLAUDE_IMAGE_BYTES if (ENGINE == "claude" and is_image) else MAX_MEDIA_BYTES
+                    if len(res.media[1]) > limit:
                         st.session_state["file_msg"] = (
-                            "error", "파일이 너무 큽니다(15MB 초과). 본문을 직접 붙여넣어 주세요.")
+                            "error",
+                            f"파일이 너무 큽니다({limit // (1024 * 1024)}MB 초과). 본문을 직접 붙여넣어 주세요.")
                     else:
                         st.session_state["media"] = res.media
                         st.session_state["file_msg"] = ("warning", "📎 " + res.note)
@@ -378,7 +504,7 @@ with col_out:
         media = st.session_state.get("media")
 
         if not api_key:
-            st.error("좌측 사이드바에 Gemini API Key를 입력해주세요.")
+            st.error(f"좌측 사이드바에 {ENGINE_LABEL} API Key를 입력해주세요.")
         elif not target_rt_opt or not para_count:
             st.error("⚠️ 목표 방송 분량과 기사 문단 구조를 선택해 주세요.")
         elif not source_text and not media:
@@ -389,17 +515,15 @@ with col_out:
             prompt = build_prompt(article_num, rep_name, staff_str, target_rt_opt, para_count,
                                   custom_instruction, source_text, bool(media))
 
-            first_parts = [{"text": prompt}]
-            if media and not source_text:
-                first_parts.append({"inline_data": {
-                    "mime_type": media[0],
-                    "data": base64.b64encode(media[1]).decode(),
-                }})
+            if ENGINE == "claude":
+                models = [str(get_secret("CLAUDE_MODEL", "") or "")] + CLAUDE_DEFAULT_MODELS
+            else:
+                models = ([str(get_secret("GEMINI_MODEL", "") or "")]
+                          + discover_gemini_models(api_key.strip()) + GEMINI_FALLBACK_MODELS)
+            models = list(dict.fromkeys(m for m in models if m))
 
-            models = [m for m in [str(get_secret("GEMINI_MODEL", "") or "")] + DEFAULT_MODELS if m]
-            models = list(dict.fromkeys(models))
-
-            contents = [{"role": "user", "parts": first_parts}]
+            contents = [{"role": "user", "text": prompt,
+                         "media": media if (media and not source_text) else None}]
             best = None  # (거리, 텍스트, 글자수, 단락수, 모델)
             attempts = 0
             error = ""
@@ -407,7 +531,7 @@ with col_out:
             with st.spinner("단신 원고를 작성하고 분량을 검수하는 중..."):
                 try:
                     for attempts in range(1, MAX_ATTEMPTS + 1):
-                        text, used_model = call_gemini(api_key.strip(), contents, models)
+                        text, used_model = call_ai(ENGINE, api_key.strip(), contents, models)
                         count, n_paras = analyze_body(text)
                         if count is None:
                             dist = 10**6
@@ -434,10 +558,10 @@ with col_out:
                         if dist == 0:
                             break
                         contents = contents + [
-                            {"role": "model", "parts": [{"text": text}]},
-                            {"role": "user", "parts": [{"text": feedback}]},
+                            {"role": "assistant", "text": text},
+                            {"role": "user", "text": feedback},
                         ]
-                except GeminiError as ex:
+                except AIError as ex:
                     error = str(ex)
 
             if best is None:
