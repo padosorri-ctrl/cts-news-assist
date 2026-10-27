@@ -469,10 +469,18 @@ with st.sidebar:
         api_key = st.text_input(f"{ENGINE_LABEL} API Key 입력", type="password")
     else:
         st.caption(f"API 키: 서버 설정 사용 중 ({ENGINE_LABEL})")
+    st.markdown("**📊 사용 이력**")
+    log_bytes = b""
     if os.path.exists(LOG_PATH):
         with open(LOG_PATH, "rb") as f:
-            st.download_button("📊 사용 이력(CSV) 내려받기", f.read(),
-                               file_name="usage_log.csv", mime="text/csv")
+            log_bytes = f.read()
+    n_logs = max(log_bytes.decode("utf-8-sig", errors="ignore").count("\n") - 1, 0) if log_bytes else 0
+    if n_logs:
+        st.caption(f"서버가 마지막으로 켜진 뒤 생성 {n_logs}건")
+        st.download_button("사용 이력(CSV) 내려받기", log_bytes,
+                           file_name="usage_log.csv", mime="text/csv")
+    else:
+        st.caption("아직 기록이 없습니다. 서버가 재시작되면 기록이 초기화되며, 그 뒤 생성한 원고부터 쌓입니다.")
     if st.button("로그아웃"):
         st.session_state["authenticated"] = False
         st.rerun()
@@ -712,6 +720,7 @@ with col_out:
                     article_num, rep_name, target_rt_opt, used_model,
                     count, n_paras, attempts, "Y" if dist == 0 else "N",
                 ])
+                st.rerun()  # 사이드바의 사용 이력 건수를 바로 갱신
 
     result = st.session_state.get("result")
     if result:
