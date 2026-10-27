@@ -598,13 +598,12 @@ with col_out:
                 st.success(
                     f"✅ 본문 {result['count']}자 / {result['paras']}단락 "
                     f"(기준 {result['lo']}~{result['hi']}자, {result['target_paras']}단락 충족) "
-                    f"· 엔진 {result['model']} · 시도 {result['attempts']}회")
+                    f"· 시도 {result['attempts']}회")
             else:
                 st.warning(
                     f"⚠️ 본문 {result['count']}자 / {result['paras']}단락으로 기준 "
                     f"({result['lo']}~{result['hi']}자, {result['target_paras']}단락)에 "
-                    f"{result['attempts']}회 시도 후에도 맞지 않았습니다. 데스크에서 다듬어 주세요. "
-                    f"(엔진 {result['model']})")
+                    f"{result['attempts']}회 시도 후에도 맞지 않았습니다. 데스크에서 다듬어 주세요.")
             if result.get("warn"):
                 st.caption(f"참고: {result['warn']}")
     else:
