@@ -259,15 +259,25 @@ with col_in:
 
     c3, c4 = st.columns([1, 1])
     with c3:
-        target_rt_opt = st.selectbox("⏱️ 목표 방송 분량 (RT)", list(RT_SPEC.keys()))
+        target_rt_opt = st.selectbox(
+            "⏱️ 목표 방송 분량 (RT)", list(RT_SPEC.keys()),
+            index=None, placeholder="분량을 선택하세요",
+        )
     with c4:
-        if "30초" in target_rt_opt:
+        if target_rt_opt and "30초" in target_rt_opt:
             para_options = ["3단락 (도입-핵심데이터-전망 / 30초 표준)"]
-        elif "40초" in target_rt_opt:
+        elif target_rt_opt and "40초" in target_rt_opt:
             para_options = ["3단락 (도입-세부-인용)", "4단락 (도입-세부-인용-전망)"]
-        else:
+        elif target_rt_opt:
             para_options = ["4단락 (도입-세부-인용-사역의의 / 50초 표준)"]
-        para_count = st.selectbox("📑 기사 문단 구조", para_options)
+        else:
+            para_options = []
+        para_count = st.selectbox(
+            "📑 기사 문단 구조", para_options,
+            index=None,
+            placeholder="먼저 분량을 선택하세요" if not target_rt_opt else "문단 구조를 선택하세요",
+            disabled=not target_rt_opt,
+        )
 
     st.markdown("---")
     credit_type = st.radio("영상 구분", ["자료제공", "현장취재 (영상취재)"], horizontal=True)
@@ -369,6 +379,8 @@ with col_out:
 
         if not api_key:
             st.error("좌측 사이드바에 Gemini API Key를 입력해주세요.")
+        elif not target_rt_opt or not para_count:
+            st.error("⚠️ 목표 방송 분량과 기사 문단 구조를 선택해 주세요.")
         elif not source_text and not media:
             st.error("⚠️ 보도자료 내용이 비어있습니다.")
         else:
