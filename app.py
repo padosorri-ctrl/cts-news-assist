@@ -48,7 +48,7 @@ st.session_state.setdefault("auth_fails", 0)
 if not st.session_state["authenticated"]:
     st.markdown("""
     <style>
-        .auth-title { font-size: 20px; font-weight: 800; color: #0F2C59; text-align: center; margin-top: 60px; }
+        .auth-title { font-size: 20px; font-weight: 800; text-align: center; margin-top: 60px; }
         .auth-desc { font-size: 13px; color: #64748B; text-align: center; margin-bottom: 20px; }
     </style>
     <div class="auth-title">🎙️ CTS 보도국 Style Assist Pro</div>
@@ -164,7 +164,7 @@ def build_prompt(article_num, rep_name, staff_str, target_rt_opt, para_count,
 
 [작성 옵션]:
 - 식별 헤더: {article_num}
-- 담당 기자: {rep_name}
+- 담당 기자: {rep_name if rep_name else "미입력(제목 뒤 괄호 표기 생략)"}
 - 영상 스태프 정보:
 {staff_str}
 - 목표 분량 (RT): {target_rt_opt}
@@ -192,7 +192,7 @@ def build_prompt(article_num, rep_name, staff_str, target_rt_opt, para_count,
 - 단락과 단락 사이에는 빈 줄 하나(엔터 2번)를 넣어 완전히 분리하십시오. 한 덩어리로 뭉쳐 쓰지 마십시오.
 
 [출력 양식]: 아래 형식을 그대로 따르되 안내 문구는 실제 내용으로 바꿔 쓰십시오.
-{article_num} 기사 메인 타이틀 ({rep_name})
+{article_num} 기사 메인 타이틀{f" ({rep_name})" if rep_name else ""}
 
 {BODY_START}
 (본문 {para_count[0]}단락. 마커 두 줄은 반드시 그대로 출력)
@@ -221,7 +221,7 @@ def build_prompt(article_num, rep_name, staff_str, target_rt_opt, para_count,
 # ------------------------------------------------------------------ 3. 메인 화면
 st.markdown("""
 <style>
-    .main-title { font-size: 22px; font-weight: 800; color: #0F2C59; margin-bottom: 20px; }
+    .main-title { font-size: 22px; font-weight: 800; margin-bottom: 20px; }
     .stTextArea textarea { font-family: 'Pretendard', 'Apple SD Gothic Neo', sans-serif; font-size: 13.5px; }
 </style>
 """, unsafe_allow_html=True)
@@ -255,7 +255,7 @@ with col_in:
     with c1:
         article_num = st.text_input("기사 순번", value=f"{today_str} 기사1 [단신]")
     with c2:
-        rep_name = st.text_input("담당 기자명", value="이가영")
+        rep_name = st.text_input("담당 기자명", value="", placeholder="기자 이름 입력").strip()
 
     c3, c4 = st.columns([1, 1])
     with c3:
@@ -282,23 +282,25 @@ with col_in:
             cam_list = st.multiselect(
                 "🎥 영상취재 기자 선택 (중복 가능)",
                 ["전승민", "전용완", "김효근", "김대상", "우태림", "오현택"],
-                default=["전승민"],
+                default=[],
             )
-            cam_str = " ".join(cam_list) if cam_list else "전승민"
+            cam_str = " ".join(cam_list)
             source_input = st.text_input("자료출처 표기 (선택)", placeholder="필요시 기재 (예: 유튜브 채널명 등)")
 
     with c6:
         edit_list = st.multiselect(
             "✂️ 영상편집 기자 선택 (중복 가능)",
             ["최신영", "서혜원", "강성민"],
-            default=["최신영"],
+            default=[],
         )
-        edit_str = " ".join(edit_list) if edit_list else "최신영"
+        edit_str = " ".join(edit_list)
 
+    edit_line = f"\n영상편집 {edit_str}" if edit_str else ""
     if credit_type == "자료제공":
-        staff_str = f"{provider_str}\n영상편집 {edit_str}"
+        staff_str = f"{provider_str}{edit_line}"
     else:
-        staff_str = f"영상취재 {cam_str}\n영상편집 {edit_str}"
+        cam_line = f"영상취재 {cam_str}" if cam_str else "영상취재"
+        staff_str = f"{cam_line}{edit_line}"
     if source_input:
         staff_str += f"\n(자료출처: {source_input})"
 
